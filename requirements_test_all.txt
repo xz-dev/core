@@ -771,6 +771,9 @@ greeclimate==1.4.1
 # homeassistant.components.greeneye_monitor
 greeneye_monitor==3.0.3
 
+# homeassistant.components.recorder
+greenlet==3.0.3
+
 # homeassistant.components.pure_energie
 gridnet==5.0.0
 
