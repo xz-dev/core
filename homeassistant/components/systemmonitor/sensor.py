@@ -1,16 +1,16 @@
 """Support for monitoring the local system."""
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 import logging
 import socket
 import sys
-from typing import Any, Generic
+from typing import Any, Generic, cast
 
 import psutil
-from psutil._common import sdiskusage, sswap
+from psutil._common import sdiskusage, snetio, snicaddr, sswap
 from psutil._pslinux import svmem
 import voluptuous as vol
 
@@ -77,103 +77,156 @@ SENSOR_TYPE_MANDATORY_ARG = 4
 SIGNAL_SYSTEMMONITOR_UPDATE = "systemmonitor_update"
 
 
-def get_update(entity: SystemMonitorSensor[dataT]) -> StateType:  # noqa: C901
-    """Get the latest system information."""
-    state = None
-    type_ = entity.entity_description.key
+def get_disk_use_percent(entity: SystemMonitorSensor[dataT]) -> float:
+    """Return disk use percent."""
+    disk = cast(sdiskusage, entity.coordinator.data)
+    return disk.percent
 
-    if type_ == "disk_use_percent":
-        state = entity.coordinator.data.percent
-    elif type_ == "disk_use":
-        state = round(entity.coordinator.data.used / 1024**3, 1)
-    elif type_ == "disk_free":
-        state = round(entity.coordinator.data.free / 1024**3, 1)
-    elif type_ == "memory_use_percent":
-        state = entity.coordinator.data.percent
-    elif type_ == "memory_use":
-        virtual_memory = entity.coordinator.data
-        state = round((virtual_memory.total - virtual_memory.available) / 1024**2, 1)
-    elif type_ == "memory_free":
-        state = round(entity.coordinator.data.available / 1024**2, 1)
-    elif type_ == "swap_use_percent":
-        state = entity.coordinator.data.percent
-    elif type_ == "swap_use":
-        state = round(entity.coordinator.data.used / 1024**2, 1)
-    elif type_ == "swap_free":
-        state = round(entity.coordinator.data.free / 1024**2, 1)
-    elif type_ == "processor_use":
-        state = round(entity.coordinator.data)
-    elif type_ == "processor_temperature":
-        state = entity.coordinator.data
-    elif type_ == "process":
-        state = STATE_OFF
-        for proc in entity.coordinator.data:
-            try:
-                if entity.argument == proc.name():
-                    state = STATE_ON
-                    break
-            except psutil.NoSuchProcess as err:
-                _LOGGER.warning(
-                    "Failed to load process with ID: %s, old name: %s",
-                    err.pid,
-                    err.name,
-                )
-    elif type_ in ("network_out", "network_in"):
-        counters = entity.coordinator.data
-        if entity.argument in counters:
-            counter = counters[entity.argument][IO_COUNTER[type_]]
-            state = round(counter / 1024**2, 1)
-        else:
-            state = None
-    elif type_ in ("packets_out", "packets_in"):
-        counters = entity.coordinator.data
-        if entity.argument in counters:
-            state = counters[entity.argument][IO_COUNTER[type_]]
-        else:
-            state = None
-    elif type_ in ("throughput_network_out", "throughput_network_in"):
-        counters = entity.coordinator.data
-        if entity.argument in counters:
-            counter = counters[entity.argument][IO_COUNTER[type_]]
-            now = dt_util.utcnow()
-            if entity.value and entity.value < counter:
-                state = round(
-                    (counter - entity.value)
-                    / 1000**2
-                    / (now - (entity.update_time or now)).total_seconds(),
-                    3,
-                )
-            else:
-                state = None
+
+def get_disk_use(entity: SystemMonitorSensor[dataT]) -> float:
+    """Return disk use."""
+    disk = cast(sdiskusage, entity.coordinator.data)
+    return round(disk.used / 1024**3, 1)
+
+
+def get_disk_free(entity: SystemMonitorSensor[dataT]) -> float:
+    """Return disk free."""
+    disk = cast(sdiskusage, entity.coordinator.data)
+    return round(disk.free / 1024**3, 1)
+
+
+def get_memory_use_percent(entity: SystemMonitorSensor[dataT]) -> float:
+    """Return memory use percent."""
+    virtual_memory = cast(svmem, entity.coordinator.data)
+    return virtual_memory.percent
+
+
+def get_memory_use(entity: SystemMonitorSensor[dataT]) -> float:
+    """Return memory use."""
+    virtual_memory = cast(svmem, entity.coordinator.data)
+    return round((virtual_memory.total - virtual_memory.available) / 1024**2, 1)
+
+
+def get_memory_free(entity: SystemMonitorSensor[dataT]) -> float:
+    """Return memory free."""
+    memory = cast(svmem, entity.coordinator.data)
+    return round(memory.available / 1024**2, 1)
+
+
+def get_swap_use_percent(entity: SystemMonitorSensor[dataT]) -> float:
+    """Return swap use percent."""
+    swap = cast(sswap, entity.coordinator.data)
+    return swap.percent
+
+
+def get_swap_use(entity: SystemMonitorSensor[dataT]) -> float:
+    """Return swap use."""
+    swap = cast(sswap, entity.coordinator.data)
+    return round(swap.used / 1024**2, 1)
+
+
+def get_swap_free(entity: SystemMonitorSensor[dataT]) -> float:
+    """Return swap free."""
+    swap = cast(sswap, entity.coordinator.data)
+    return round(swap.free / 1024**2, 1)
+
+
+def get_processor_use(entity: SystemMonitorSensor[dataT]) -> int:
+    """Return processor use."""
+    return round(cast(float, entity.coordinator.data))
+
+
+def get_processor_temperature(entity: SystemMonitorSensor[dataT]) -> float:
+    """Return processor temperature."""
+    return cast(float, entity.coordinator.data)
+
+
+def get_process(entity: SystemMonitorSensor[dataT]) -> str:
+    """Return process."""
+    state = STATE_OFF
+    for proc in cast(Iterator[psutil.Process], entity.coordinator.data):
+        try:
+            if entity.argument == proc.name():
+                state = STATE_ON
+                break
+        except psutil.NoSuchProcess as err:
+            _LOGGER.warning(
+                "Failed to load process with ID: %s, old name: %s",
+                err.pid,
+                err.name,
+            )
+    return state
+
+
+def get_network(entity: SystemMonitorSensor[dataT]) -> float | None:
+    """Return network in and out."""
+    counters = cast(dict[str, snetio], entity.coordinator.data)
+    if entity.argument in counters:
+        counter = counters[entity.argument][IO_COUNTER[entity.entity_description.key]]
+        return round(counter / 1024**2, 1)
+    return None
+
+
+def get_packets(entity: SystemMonitorSensor[dataT]) -> float | None:
+    """Return packets in and out."""
+    return get_network(entity)
+
+
+def get_throughput(entity: SystemMonitorSensor[dataT]) -> float | None:
+    """Return network throughput in and out."""
+    counters = cast(dict[str, snetio], entity.coordinator.data)
+    if entity.argument in counters:
+        counter = counters[entity.argument][IO_COUNTER[entity.entity_description.key]]
+        now = dt_util.utcnow()
+        if entity.value and entity.value < counter:
             entity.update_time = now
             entity.value = counter
-        else:
-            state = None
-    elif type_ in ("ipv4_address", "ipv6_address"):
-        addresses = entity.coordinator.data
-        if entity.argument in addresses:
-            for addr in addresses[entity.argument]:
-                if addr.family == IF_ADDRS_FAMILY[type_]:
-                    state = addr.address
-        else:
-            state = None
-    elif type_ == "last_boot":
-        state = dt_util.utc_from_timestamp(entity.coordinator.data)
-    elif type_ == "load_1m":
-        state = round(entity.coordinator.data[0], 2)
-    elif type_ == "load_5m":
-        state = round(entity.coordinator.data[1], 2)
-    elif type_ == "load_15m":
-        state = round(entity.coordinator.data[2], 2)
+            return round(
+                (counter - entity.value)
+                / 1000**2
+                / (now - (entity.update_time or now)).total_seconds(),
+                3,
+            )
+        entity.update_time = now
+        entity.value = counter
+    return None
 
-    return state
+
+def get_ip_address(entity: SystemMonitorSensor[dataT]) -> str | None:
+    """Return network ip address."""
+    addresses = cast(dict[str, list[snicaddr]], entity.coordinator.data)
+    if entity.argument in addresses:
+        for addr in addresses[entity.argument]:
+            if addr.family == IF_ADDRS_FAMILY[entity.entity_description.key]:
+                return addr.address
+    return None
+
+
+def get_last_boot(entity: SystemMonitorSensor[dataT]) -> datetime:
+    """Return last boot."""
+    return cast(datetime, entity.coordinator.data)
+
+
+def get_load_1m(entity: SystemMonitorSensor[dataT]) -> float:
+    """Return load 1m."""
+    return round(cast(tuple[float, float, float], entity.coordinator.data)[0], 2)
+
+
+def get_load_5m(entity: SystemMonitorSensor[dataT]) -> float:
+    """Return load 5m."""
+    return round(cast(tuple[float, float, float], entity.coordinator.data)[1], 2)
+
+
+def get_load_15m(entity: SystemMonitorSensor[dataT]) -> float:
+    """Return load 15m."""
+    return round(cast(tuple[float, float, float], entity.coordinator.data)[2], 2)
 
 
 @dataclass(frozen=True)
 class SysMonitorSensorEntityDescriptionMixin(Generic[dataT]):
     """Mixin for System Monitor sensor entities."""
 
-    value_fn: Callable[[SystemMonitorSensor[dataT]], StateType | datetime] = get_update
+    value_fn: Callable[[SystemMonitorSensor[dataT]], StateType | datetime]
 
 
 @dataclass(frozen=True)
@@ -194,6 +247,7 @@ SENSOR_TYPES: dict[str, SysMonitorSensorEntityDescription[Any]] = {
         device_class=SensorDeviceClass.DATA_SIZE,
         icon="mdi:harddisk",
         state_class=SensorStateClass.MEASUREMENT,
+        value_fn=get_disk_free,
     ),
     "disk_use": SysMonitorSensorEntityDescription[sdiskusage](
         key="disk_use",
@@ -202,48 +256,56 @@ SENSOR_TYPES: dict[str, SysMonitorSensorEntityDescription[Any]] = {
         device_class=SensorDeviceClass.DATA_SIZE,
         icon="mdi:harddisk",
         state_class=SensorStateClass.MEASUREMENT,
+        value_fn=get_disk_use,
     ),
-    "disk_use_percent": SysMonitorSensorEntityDescription[sdiskusage](
+    "disk_use_percent": SysMonitorSensorEntityDescription[float](
         key="disk_use_percent",
         name="Disk use (percent)",
         native_unit_of_measurement=PERCENTAGE,
         icon="mdi:harddisk",
         state_class=SensorStateClass.MEASUREMENT,
+        value_fn=get_disk_use_percent,
     ),
     "ipv4_address": SysMonitorSensorEntityDescription[str](
         key="ipv4_address",
         name="IPv4 address",
         icon="mdi:ip-network",
         mandatory_arg=True,
+        value_fn=get_ip_address,
     ),
     "ipv6_address": SysMonitorSensorEntityDescription[str](
         key="ipv6_address",
         name="IPv6 address",
         icon="mdi:ip-network",
         mandatory_arg=True,
+        value_fn=get_ip_address,
     ),
     "last_boot": SysMonitorSensorEntityDescription[datetime](
         key="last_boot",
         name="Last boot",
         device_class=SensorDeviceClass.TIMESTAMP,
+        value_fn=get_last_boot,
     ),
     "load_15m": SysMonitorSensorEntityDescription[tuple[float, float, float]](
         key="load_15m",
         name="Load (15m)",
         icon=CPU_ICON,
         state_class=SensorStateClass.MEASUREMENT,
+        value_fn=get_load_15m,
     ),
     "load_1m": SysMonitorSensorEntityDescription[tuple[float, float, float]](
         key="load_1m",
         name="Load (1m)",
         icon=CPU_ICON,
         state_class=SensorStateClass.MEASUREMENT,
+        value_fn=get_load_1m,
     ),
     "load_5m": SysMonitorSensorEntityDescription[tuple[float, float, float]](
         key="load_5m",
         name="Load (5m)",
         icon=CPU_ICON,
         state_class=SensorStateClass.MEASUREMENT,
+        value_fn=get_load_5m,
     ),
     "memory_free": SysMonitorSensorEntityDescription[svmem](
         key="memory_free",
@@ -252,6 +314,7 @@ SENSOR_TYPES: dict[str, SysMonitorSensorEntityDescription[Any]] = {
         device_class=SensorDeviceClass.DATA_SIZE,
         icon="mdi:memory",
         state_class=SensorStateClass.MEASUREMENT,
+        value_fn=get_memory_free,
     ),
     "memory_use": SysMonitorSensorEntityDescription[svmem](
         key="memory_use",
@@ -260,6 +323,7 @@ SENSOR_TYPES: dict[str, SysMonitorSensorEntityDescription[Any]] = {
         device_class=SensorDeviceClass.DATA_SIZE,
         icon="mdi:memory",
         state_class=SensorStateClass.MEASUREMENT,
+        value_fn=get_memory_use,
     ),
     "memory_use_percent": SysMonitorSensorEntityDescription[svmem](
         key="memory_use_percent",
@@ -267,6 +331,7 @@ SENSOR_TYPES: dict[str, SysMonitorSensorEntityDescription[Any]] = {
         native_unit_of_measurement=PERCENTAGE,
         icon="mdi:memory",
         state_class=SensorStateClass.MEASUREMENT,
+        value_fn=get_memory_use_percent,
     ),
     "network_in": SysMonitorSensorEntityDescription[int](
         key="network_in",
@@ -276,6 +341,7 @@ SENSOR_TYPES: dict[str, SysMonitorSensorEntityDescription[Any]] = {
         icon="mdi:server-network",
         state_class=SensorStateClass.TOTAL_INCREASING,
         mandatory_arg=True,
+        value_fn=get_network,
     ),
     "network_out": SysMonitorSensorEntityDescription[int](
         key="network_out",
@@ -285,6 +351,7 @@ SENSOR_TYPES: dict[str, SysMonitorSensorEntityDescription[Any]] = {
         icon="mdi:server-network",
         state_class=SensorStateClass.TOTAL_INCREASING,
         mandatory_arg=True,
+        value_fn=get_network,
     ),
     "packets_in": SysMonitorSensorEntityDescription[int](
         key="packets_in",
@@ -292,6 +359,7 @@ SENSOR_TYPES: dict[str, SysMonitorSensorEntityDescription[Any]] = {
         icon="mdi:server-network",
         state_class=SensorStateClass.TOTAL_INCREASING,
         mandatory_arg=True,
+        value_fn=get_packets,
     ),
     "packets_out": SysMonitorSensorEntityDescription[int](
         key="packets_out",
@@ -299,6 +367,7 @@ SENSOR_TYPES: dict[str, SysMonitorSensorEntityDescription[Any]] = {
         icon="mdi:server-network",
         state_class=SensorStateClass.TOTAL_INCREASING,
         mandatory_arg=True,
+        value_fn=get_packets,
     ),
     "throughput_network_in": SysMonitorSensorEntityDescription[float | None](
         key="throughput_network_in",
@@ -307,6 +376,7 @@ SENSOR_TYPES: dict[str, SysMonitorSensorEntityDescription[Any]] = {
         device_class=SensorDeviceClass.DATA_RATE,
         state_class=SensorStateClass.MEASUREMENT,
         mandatory_arg=True,
+        value_fn=get_throughput,
     ),
     "throughput_network_out": SysMonitorSensorEntityDescription[float | None](
         key="throughput_network_out",
@@ -315,12 +385,14 @@ SENSOR_TYPES: dict[str, SysMonitorSensorEntityDescription[Any]] = {
         device_class=SensorDeviceClass.DATA_RATE,
         state_class=SensorStateClass.MEASUREMENT,
         mandatory_arg=True,
+        value_fn=get_throughput,
     ),
     "process": SysMonitorSensorEntityDescription[bool](
         key="process",
         name="Process",
         icon=CPU_ICON,
         mandatory_arg=True,
+        value_fn=get_process,
     ),
     "processor_use": SysMonitorSensorEntityDescription[float](
         key="processor_use",
@@ -328,6 +400,7 @@ SENSOR_TYPES: dict[str, SysMonitorSensorEntityDescription[Any]] = {
         native_unit_of_measurement=PERCENTAGE,
         icon=CPU_ICON,
         state_class=SensorStateClass.MEASUREMENT,
+        value_fn=get_processor_use,
     ),
     "processor_temperature": SysMonitorSensorEntityDescription[float](
         key="processor_temperature",
@@ -335,6 +408,7 @@ SENSOR_TYPES: dict[str, SysMonitorSensorEntityDescription[Any]] = {
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
+        value_fn=get_processor_temperature,
     ),
     "swap_free": SysMonitorSensorEntityDescription[sswap](
         key="swap_free",
@@ -343,6 +417,7 @@ SENSOR_TYPES: dict[str, SysMonitorSensorEntityDescription[Any]] = {
         device_class=SensorDeviceClass.DATA_SIZE,
         icon="mdi:harddisk",
         state_class=SensorStateClass.MEASUREMENT,
+        value_fn=get_swap_free,
     ),
     "swap_use": SysMonitorSensorEntityDescription[sswap](
         key="swap_use",
@@ -351,6 +426,7 @@ SENSOR_TYPES: dict[str, SysMonitorSensorEntityDescription[Any]] = {
         device_class=SensorDeviceClass.DATA_SIZE,
         icon="mdi:harddisk",
         state_class=SensorStateClass.MEASUREMENT,
+        value_fn=get_swap_use,
     ),
     "swap_use_percent": SysMonitorSensorEntityDescription[sswap](
         key="swap_use_percent",
@@ -358,6 +434,7 @@ SENSOR_TYPES: dict[str, SysMonitorSensorEntityDescription[Any]] = {
         native_unit_of_measurement=PERCENTAGE,
         icon="mdi:harddisk",
         state_class=SensorStateClass.MEASUREMENT,
+        value_fn=get_swap_use_percent,
     ),
 }
 
